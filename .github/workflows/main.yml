@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-13
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: 'recursive'
+          fetch-depth: '0'
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.2'
+
+      - name: Create canonical source directory
+        run: |
+          set -x
+          sudo mkdir -p /Users/Shared
+          cp -R $GITHUB_WORKSPACE /Users/Shared/
+          mv /Users/Shared/$(basename $GITHUB_WORKSPACE) /Users/Shared/telegram-ios
+
+      - name: Build the App (unsigned)
+        run: |
+          set -x
+          cd /Users/Shared/telegram-ios
+          # version info
+          BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
+          APP_VERSION=$(jq -r .app versions.json)
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          BUILD_NUMBER=$((COMMIT_COUNT+BUILD_NUMBER_OFFSET))
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> $GITHUB_ENV
+          echo "APP_VERSION=$APP_VERSION" >> $GITHUB_ENV
+
+          # Build without signing
+          xcodebuild \
+            -workspace Telegram.xcworkspace \
+            -scheme Telegram \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+          # Package into IPA
+          OUTPUT_PATH="build/artifacts"
+          rm -rf "$OUTPUT_PATH"
+          mkdir -p "$OUTPUT_PATH"
+          mkdir -p Payload
+          cp -r build/Release-iphoneos/Telegram.app Payload/
+          (cd Payload && zip -r ../$OUTPUT_PATH/Telegram.ipa Telegram.app)
+          rm -rf Payload
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: build-${{ env.BUILD_NUMBER }}
+          release_name: Telegram ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }})
+          body: |
+            An **unsigned** build of Telegram for iOS ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }}).
+            For jailbroken devices (install with Filza or `appinst`).
+          draft: false
+          prerelease: false
+
+      - name: Upload Release IPA
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: /Users/Shared/telegram-ios/build/artifacts/Telegram.ipa
+          asset_name: Telegram.ipa
+          asset_content_type: application/zip
